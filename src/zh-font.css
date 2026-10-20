@@ -1,0 +1,793 @@
+/* 中文查看器字体优化：由 server.js 注入到 </head> 之前。
+ *
+ * 问题：viewer 里声明的 Playfair Display / Lora / Inter / JetBrains Mono 并没有随页面加载
+ * （index.html 没有 @font-face，也没有 webfont 链接），中文于是回退到系统 serif。
+ * Windows 上这个回退是宋体，且宋体没有真正的 bold —— 字号 8~13px、font-weight 600/700 时
+ * 浏览器做合成加粗，笔画糊在一起，看上去就是「虚、模糊」。
+ *
+ * 做法：不引入 web font，只覆盖原有字体变量与最小组字号：
+ *   1) 四个字体变量都在末尾补上本地中文字体（微软雅黑 / 苹方 / 思源黑体），中文走黑体；
+ *   2) 8~10px 的中文微标签抬高字号下限，中文标签 0.12~0.18em 的字距收紧；
+ *   3) 其他排版（字号档位、字重、颜色、间距结构）保持原样。
+ * 需要调整时只改这个文件，重新加载页面即可，不用动 zh.js。
+ */
+
+:root {
+  --font-display: 'Playfair Display', Georgia, 'Times New Roman',
+    "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", "Hiragino Sans GB",
+    "Source Han Sans SC", "Noto Sans SC", "Noto Sans CJK SC", sans-serif;
+  --font-body: 'Lora', Georgia,
+    "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", "Hiragino Sans GB",
+    "Source Han Sans SC", "Noto Sans SC", "Noto Sans CJK SC", sans-serif;
+  --font-ui: 'Inter', -apple-system, 'Segoe UI',
+    "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", "Hiragino Sans GB",
+    "Source Han Sans SC", "Noto Sans SC", "Noto Sans CJK SC", sans-serif;
+  --font-mono: 'JetBrains Mono', 'SF Mono', 'Fira Code', Consolas,
+    "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", monospace;
+}
+
+/* 8px 级中文微标签 */
+.tab-group-label, .ses-links .badge { font-size: 10px; }
+
+/* 9px 级中文微标签：抬到 10.5px */
+.badge, .stat-card .label, th, .metric-table th,
+.obs-type-chip, .kind-tag, .ready-badge, .copy-btn, .help,
+.mem-section-title, .empty-steps-title, .empty-grid dt,
+.heatmap-labels, .hm-days, .hm-months { font-size: 10.5px; }
+
+/* 10px 级中文微标签：抬到 11px */
+.chip, .tag, .mem-chip, .type-chip, .section-head h2, .gauge-label,
+.dateline, .audit-fn, .ccols h4, .cstep-n, .ws-status, .gd-sub,
+.hm-stats > div, .ses-stats small, .activity-feed-meta { font-size: 11px; }
+
+/* 中文微标签的字距：原设计是给拉丁大写字母用的，中文按 0.15em/0.18em 会显得散 */
+.stat-card .label, .tab-group-label, .badge, .chip, .tag, .kind-tag,
+.obs-type-chip, .ready-badge { letter-spacing: 0.03em; }
+
+/* 表格表头同理收紧，字号略降回，避免表头比正文还抢眼 */
+th, .metric-table th { font-size: 10.5px; letter-spacing: 0.05em; }
+
+/* ---- 第二轮：可读性（颜色 + 小字号） ----
+ * 字形换成黑体后仍然"虚"的主因不是字体，而是配色和字号：
+ * 次级文字用的是 #666 / #999，叠加 9~13px 的 CJK 笔画，看着自然发浅。
+ * 这里把浅灰抬高一级，并把仍然偏小的几处中文抬到 11~14px。 */
+
+:root {
+  --ink-muted: #4a4a4a;
+  --ink-faint: #757575;
+}
+
+/* 顶部页签：11px -> 12px */
+.tab-bar button { font-size: 12px; }
+
+/* 结晶/记忆正文：13px -> 14px */
+.obs-card .obs-narrative, .memory-row .mem-excerpt { font-size: 14px; }
+
+/* 经验条目：12px -> 13px，其中的实体链接 11px -> 12px */
+.ses-links li { font-size: 13px; }
+.entity-link { font-size: 12px; }
+
+/* 分区标题、小标签再加一档 */
+.mem-section-title { font-size: 11px; letter-spacing: 0.08em; }
+.kind-tag, .copy-btn, .ver-badge, .replay-event-kind, .empty-grid dt { font-size: 10.5px; }
+
+/* ---- 第三轮：健康页说明小字加粗 ----
+ * 用户反馈健康页那批浅灰说明文字仍然「虚」。这些字是 11~12px + 常规字重 + 浅灰
+ * （--ink-faint / --ink-muted），中文笔画本就细，远看就是一整片灰雾。
+ * 处理：统一抬到 12px、font-weight 600（微软雅黑 / 苹方 / 思源黑体在 600 下取真 Bold，
+ * 不再走浏览器的合成加粗），颜色收深到 --ink-muted，让小字也看得清。 */
+
+.hnote,
+.stat-card .sub,
+.verdict-meta,
+.layer-detail,
+.layer-from,
+.layer-preview,
+.cstep-d,
+.ckv > span:first-child,
+.flag-how,
+.problem .pf {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink-muted);
+}
+
+/* 表格正文与 stale 提示：只加字重，保持原有颜色层次 */
+.hstale,
+.metric-table td,
+.flag-item .flag-item-desc {
+  font-weight: 600;
+}
+
+.flag-item .flag-item-meta { font-size: 11.5px; font-weight: 500; color: var(--ink-muted); }
+
+/* ---- 第四轮：说明小字统一加粗（经验 / 结晶 / 行动 / 图谱页） ----
+ * 第三轮只覆盖了健康页的选择器，用户截图的经验、结晶、行动页顶部说明用 .inline-note
+ * （12px + --ink-muted），没被覆盖，所以「小字加粗」看不出变化。
+ * 这一轮把各页的说明小字、工具栏计数、图谱说明统一处理：
+ * 字号不变或抬一档，font-weight 600（雅黑 / 苹方在 600 下取真 Bold，不走合成加粗），
+ * 颜色从 --ink-faint 收深到 --ink-muted，中文笔画才立得住。 */
+
+.inline-note,
+.mem-note,
+.card-note,
+.stat-note,
+.mem-filter-note,
+.toolbar .tb-count,
+.go-desc,
+.empty-state .empty-desc,
+.empty-steps-title + .empty-desc {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink-muted);
+}
+
+/* 图谱图例、分区标题：原为 9~10px 大写拉丁设计，中文抬字号后颜色也提亮 */
+.mem-section-title,
+.gd-sub {
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  color: var(--ink-muted);
+}
+
+/* 行内小标签（来源数、使用次数、优先级）：浅灰 11px 全加一档字重 */
+.mem-chips,
+.src-list .kind-tag,
+.ses-stats small,
+.activity-feed-meta,
+.audit-meta {
+  font-weight: 600;
+  color: var(--ink-muted);
+}
+
+/* ---- 第五轮：小字再抬一档 ----
+ * 用户反馈 12px/600 仍然「虚」。除了字号偏小，中英混排时 Latin 走 Inter/Segoe、
+ * 中文走雅黑，两套字形在小字号下的笔画粗细不一致，观感就会发灰。
+ * 这一轮：说明文字统一 13px / 700，并显式把中文字族放在最前，走雅黑真 Bold；
+ * 颜色从 --ink-muted 收到 --ink-secondary，对比度再提高一档。 */
+
+.inline-note,
+.mem-note,
+.card-note,
+.stat-note,
+.mem-filter-note,
+.go-desc,
+.empty-state .empty-desc,
+.empty-steps-title + .empty-desc {
+  font-family: "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC",
+    "Hiragino Sans GB", "Source Han Sans SC", "Noto Sans SC", "Segoe UI", sans-serif;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.65;
+  color: var(--ink-secondary);
+}
+
+.inline-note strong,
+.mem-note strong,
+.card-note strong {
+  font-weight: 800;
+  color: var(--ink);
+}
+
+/* 工具栏计数、分区标题：12px / 700，中文不再走 9px 大写拉丁设计 */
+.toolbar .tb-count {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--ink-secondary);
+}
+
+.mem-section-title,
+.gd-sub {
+  font-family: "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC",
+    "Hiragino Sans GB", "Source Han Sans SC", "Noto Sans SC", "Segoe UI", sans-serif;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--ink-secondary);
+}
+
+/* 标签页计数、行内标签、来源数、使用次数 */
+.tab-bar button .tab-count,
+.mem-chips,
+.src-list .kind-tag,
+.ses-stats small,
+.activity-feed-meta,
+.audit-meta,
+.kind-tag,
+.copy-btn,
+.ver-badge,
+.empty-grid dt {
+  font-weight: 700;
+  color: var(--ink-muted);
+}
+
+/* 输入框提示文字：原来浏览器默认 placeholder 会再做一次淡化，显得比正文更虚 */
+.toolbar input::placeholder,
+.toolbar textarea::placeholder,
+.search-input::placeholder,
+input::placeholder,
+textarea::placeholder {
+  font-weight: 500;
+  color: var(--ink-muted);
+  opacity: 1;
+}
+
+/* ---- 第六轮：卡片元信息与列表小字 ----
+ * 用户反馈「小字没啥变化」。真正没被前几轮覆盖的是卡片里的时间、会话脚注、
+ * 加载更多、目标数这类 11px / 400 的元信息，以及 10.5px 的 kind-tag / copy-btn。
+ * 这些字数量最多、又是中文，11px 常规字重在雅黑下仍然发灰，所以统一抬一档。 */
+
+.rel-time,
+.session-meta,
+.ses-foot,
+.load-more,
+.obs-item-sub,
+.section-sub {
+  font-family: "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC",
+    "Hiragino Sans GB", "Source Han Sans SC", "Noto Sans SC", "Segoe UI", sans-serif;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink-muted);
+}
+
+.kind-tag,
+.copy-btn,
+.ver-badge {
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.id-chip a,
+.entity-link,
+.mem-chip,
+.tag,
+.file-tag {
+  font-weight: 600;
+}
+
+/* 列表摘要：12px / 400 的中文正文加一档字重，避免整块发虚 */
+.mem-excerpt {
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.load-more {
+  color: var(--ink-secondary);
+  cursor: pointer;
+}
+
+/* ---- 第七轮：中文字体优先 + 小字统一抬档 ----
+ * 前六轮只给部分选择器加了字号/字重，浏览器实测仍有一批 10~11px / 400~600 的
+ * 中文小字（badge、时间、说明、表头、按钮、健康页 dl 等）没被覆盖；另外
+ * --font-ui / --font-body 仍以 Inter / Lora 打头，拉丁与数字先走细体。
+ * 这一轮把中文字体放到最前，并把所有仍偏小的界面文字抬到 11.5~13px + 600/700。
+ * 只动界面元素，正文、观察内容、代码、路径不在范围内。 */
+
+:root {
+  --font-display: "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC",
+    "Hiragino Sans GB", "Source Han Sans SC", "Noto Sans SC", "Noto Sans CJK SC", sans-serif;
+  --font-body: "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC",
+    "Hiragino Sans GB", "Source Han Sans SC", "Noto Sans SC", "Noto Sans CJK SC", sans-serif;
+  --font-ui: "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC",
+    "Hiragino Sans GB", "Source Han Sans SC", "Noto Sans SC", "Noto Sans CJK SC", sans-serif;
+  --font-mono: "JetBrains Mono", "SF Mono", "Fira Code", Consolas,
+    "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", monospace;
+
+  --ink-muted: #3f3f3f;
+  --ink-faint: #5a5a5a;
+}
+
+/* 说明性段落：12.5px / 600，颜色收到次级正文色 */
+.feed-text,
+.layer-detail,
+.layer-from,
+.layer-preview,
+.hnote,
+.hstale,
+.flag-how,
+.flag-item .flag-item-desc,
+.flag-item .flag-item-meta,
+.cstep-d,
+.inline-note,
+.go-desc,
+.card-note,
+.stat-note,
+.empty-desc,
+.empty-step-label,
+.mem-note,
+.section-sub,
+.sub,
+.empty-link,
+.linkish,
+.session-meta,
+.ses-foot,
+.obs-item-sub,
+.rel-time,
+.ses-live-note,
+.bar-label,
+.bar-value,
+.src-text,
+.go-name,
+.profile dd,
+.problem .pf,
+.ckv > span:first-child {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ink-secondary);
+}
+
+/* 指标数字与主要计数：再大一档 */
+.metric-num,
+.cstep-c,
+.tb-count,
+.tab-count {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+/* 微标签、徽章、按钮、表头、时间戳：11.5px / 700 */
+.badge,
+.kind-tag,
+.copy-btn,
+.ready-badge,
+.ver-badge,
+.type-chip,
+.mem-chip,
+.obs-type-chip,
+.replay-event-kind,
+.help,
+.icon-btn,
+.btn,
+.graph-build,
+.cb-indicator,
+.tab-group-label,
+.obs-time,
+.ses-id-mini,
+.strength-num,
+.obs-importance,
+.ses-stats small,
+.gd-count,
+.go-num,
+.cstep-n,
+.empty-grid dt,
+dl,
+dt,
+th,
+.metric-table th,
+.col-opt,
+.mob-only,
+.hm-days,
+.hm-months,
+kbd,
+.key,
+.audit-op,
+.audit-fn,
+.flag-item .flag-item-meta,
+.heatmap-labels {
+  font-size: 11.5px;
+  font-weight: 700;
+}
+
+/* 表头、时间、ID 等保持各自颜色，只统一字号字重 */
+th,
+.metric-table th,
+.obs-time,
+.ses-id-mini,
+.strength-num,
+.gd-count,
+.go-num,
+.cstep-n,
+dl,
+dt,
+.audit-fn,
+.flag-item .flag-item-meta {
+  color: var(--ink-muted);
+}
+
+/* 彩色状态徽章保留语义色，只抬字号/字重 */
+.badge,
+.ready-badge,
+.ver-badge,
+.audit-op,
+.cb-indicator,
+.obs-type-chip {
+  font-weight: 700;
+}
+
+/* 按钮与下拉 */
+.btn,
+.graph-build,
+.icon-btn,
+select,
+option {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+/* 表格正文与 ID 列表 */
+td,
+.metric-table td {
+  font-size: 12.5px;
+  font-weight: 500;
+}
+
+/* ---- 第八轮：压过页面自带的组合选择器 ----
+ * 页面原有 `.mem-actions .btn`、`.obs-item-meta .obs-time`、`.section-head h2`
+ * 这类两级选择器优先级高于第七轮的单类选择器，实测这些小字仍是 10~11px / 400~600。
+ * 这里按页面实际结构补同级选择器，并用 !important 固定字号字重；
+ * 只覆盖界面标签、时间、按钮、表头和元信息，不碰观察正文、记忆正文和代码块。 */
+
+.section-head h2,
+#health-consolidation > h4,
+.ccols h4 {
+  font-size: 13px !important;
+  font-weight: 700 !important;
+  color: var(--ink) !important;
+}
+
+.section-head .section-sub,
+.card-title > span,
+.card-title .ses-live-note,
+.card > div > span,
+.hm-foot > span,
+.session-item .session-meta,
+.mem-detail-head > span {
+  font-size: 12.5px !important;
+  font-weight: 600 !important;
+  color: var(--ink-secondary) !important;
+}
+
+.badge,
+.ses-links .badge,
+.tag,
+.file-tag,
+.chip,
+.mem-chip,
+.copy-btn,
+.toolbar .copy-btn,
+.mem-chips > span,
+.obs-item-meta .obs-time,
+.obs-item-meta .obs-importance,
+.mem-meta dt,
+.detail-row .dl {
+  font-size: 11.5px !important;
+  font-weight: 700 !important;
+}
+
+.btn,
+.toolbar .btn,
+.mem-actions .btn,
+.mem-actions a.btn,
+.graph-zoom button,
+select,
+option {
+  font-size: 12px !important;
+  font-weight: 600 !important;
+}
+
+.audit-targets > span {
+  font-size: 12px !important;
+  font-weight: 500 !important;
+}
+
+/* ---- 第九轮：inline style 与统计小字 ----
+ * 健康页大量节点用 inline style 直接写 font-size（如 .hnote 12px、
+ * 「工作进程」10px、说明 div 11~13px），普通选择器压不过 inline。
+ * 这里只对健康页/仪表盘的系统信息区域用 !important 覆盖，
+ * 不碰观察正文、记忆正文、会话内容和代码块。 */
+
+#view-health .hnote,
+#view-health .layer-from,
+#view-health .layer-detail,
+#view-health .layer-preview,
+#view-health .cstep-d,
+#view-health [style*="font-size"] {
+  color: var(--ink-secondary) !important;
+  font-weight: 700 !important;
+  line-height: 1.7 !important;
+  font-family: "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC",
+    "Hiragino Sans GB", "Source Han Sans SC", "Noto Sans SC", "Segoe UI", sans-serif !important;
+}
+
+#view-health .hnote,
+#view-health p[style],
+#view-health div[style] {
+  font-size: 13px !important;
+}
+
+#view-health .layer-from,
+#view-health .layer-detail,
+#view-health .layer-preview,
+#view-health .cstep-d {
+  font-size: 12.5px !important;
+}
+
+#view-health .cstep-n,
+#view-health .ccols h4,
+#view-health summary.card-title,
+#view-health h4[style] {
+  font-size: 12px !important;
+  font-weight: 700 !important;
+  letter-spacing: 0.04em !important;
+  text-transform: none !important;
+}
+
+.stat-card .label {
+  font-size: 11.5px !important;
+  font-weight: 700 !important;
+  letter-spacing: 0.02em !important;
+  text-transform: none !important;
+  color: var(--ink-muted) !important;
+}
+
+.stat-card .sub {
+  font-size: 12px !important;
+  font-weight: 700 !important;
+  color: var(--ink-secondary) !important;
+}
+
+th,
+.metric-table th {
+  font-size: 12px !important;
+  font-weight: 700 !important;
+  letter-spacing: 0.02em !important;
+  text-transform: none !important;
+  color: var(--ink-secondary) !important;
+}
+
+.metric-table td {
+  font-size: 12.5px !important;
+  font-weight: 600 !important;
+}
+
+/* 仪表盘卡片里直接写 inline 的说明段与分组标题 */
+#view-dashboard .card > div[style*="font-size"] {
+  font-size: 13px !important;
+  font-weight: 700 !important;
+  line-height: 1.7 !important;
+  color: var(--ink-secondary) !important;
+}
+
+/* ---- 第十轮：健康页数值、图谱说明、热力图统计 ----
+ * 剩余发灰的是 12~13px / 400 的数值和说明（.dv、.ckv span、.layer-count、
+ * 图谱侧栏、热力图统计）。统一到 12.5~13px / 700。 */
+
+.detail-row .dl {
+  font-size: 12px !important;
+  font-weight: 700 !important;
+}
+
+.detail-row .dv {
+  font-size: 13px !important;
+  font-weight: 700 !important;
+  color: var(--ink) !important;
+}
+
+.ckv > span {
+  font-size: 12.5px !important;
+  font-weight: 700 !important;
+  color: var(--ink-secondary) !important;
+  line-height: 1.7 !important;
+}
+
+.layer-count {
+  font-size: 13px !important;
+  font-weight: 700 !important;
+  color: var(--ink) !important;
+}
+
+.verdict-text {
+  font-weight: 700 !important;
+}
+
+.verdict-meta {
+  font-size: 12.5px !important;
+  font-weight: 700 !important;
+  color: var(--ink-secondary) !important;
+}
+
+.graph-summary {
+  font-size: 12.5px !important;
+  font-weight: 700 !important;
+  color: var(--ink-secondary) !important;
+}
+
+.go-intro,
+.go-live {
+  font-size: 13px !important;
+  font-weight: 700 !important;
+  color: var(--ink-secondary) !important;
+  line-height: 1.7 !important;
+}
+
+.go-stats span {
+  font-size: 12px !important;
+  font-weight: 700 !important;
+  color: var(--ink-muted) !important;
+}
+
+.hm-stats > div {
+  font-size: 12.5px !important;
+  font-weight: 700 !important;
+  color: var(--ink-secondary) !important;
+}
+
+.ses-links li {
+  font-weight: 700 !important;
+  color: var(--ink-secondary) !important;
+}
+
+/* ---- 第十一轮：界面微标签再抬一档 ----
+ * 上一轮把徽章、时间、计数留在了 11.5px。中文在雅黑 / 苹方下这个档位仍然发虚，
+ * 因此统一抬到 12.5px / 700，颜色收到次级正文色；统计卡片名称只到 12px，
+ * 避免卡片内文字过挤。正文、观察内容、代码和路径不在范围内。 */
+
+.badge,
+.ses-links .badge,
+.kind-tag,
+.src-list .kind-tag,
+.copy-btn,
+.toolbar .copy-btn,
+.ready-badge,
+.ver-badge,
+.obs-type-chip,
+.type-chip,
+.replay-event-kind,
+.help,
+.ses-stats small,
+.activity-feed-meta,
+.audit-meta,
+.session-meta,
+.session-item .session-meta,
+.obs-item-meta .obs-time,
+.obs-item-meta .obs-importance,
+.mem-meta dt,
+.detail-row .dl,
+.empty-grid dt,
+.gd-count,
+.go-num,
+.cstep-n,
+.strength-num,
+.tab-count,
+.mem-chips > span,
+.flag-item .flag-item-meta,
+.audit-op,
+.heatmap-labels,
+.hm-days,
+.hm-months,
+.go-stats span,
+.hm-stats > div {
+  font-size: 12.5px !important;
+  font-weight: 700 !important;
+  color: var(--ink-secondary) !important;
+  letter-spacing: 0.01em !important;
+}
+
+/* 顶部页签本身也偏小，抬到 12.5px 并加一档字重 */
+.tab-bar button {
+  font-size: 12.5px !important;
+  font-weight: 600 !important;
+  letter-spacing: 0.01em !important;
+}
+
+/* 页签里的数字保持最深色 */
+.tab-bar button .tab-count {
+  font-size: 12.5px !important;
+  font-weight: 700 !important;
+  color: var(--ink) !important;
+}
+
+.stat-card .label {
+  font-size: 12px !important;
+  font-weight: 700 !important;
+}
+
+/* ID、函数名是拉丁字符，只抬字号，不改变颜色层级 */
+.ses-id-mini,
+.audit-fn {
+  font-size: 12px !important;
+  font-weight: 700 !important;
+}
+
+/* 第十二轮：微标签不换行。
+ * 字号抬到 12.5px 后，状态徽章在窄列里会被拆成「进行 / 中」两行。
+ * 这里让徽章与表头保持单行，由表格自动分配列宽。 */
+
+.badge,
+.ready-badge,
+.ver-badge,
+.kind-tag,
+.obs-type-chip,
+.type-chip,
+.replay-event-kind,
+th {
+  white-space: nowrap !important;
+}
+
+/* 第十三轮：深色主题下最小的几类文字颜色过暗（#6d7076），
+ * 单加字号仍会显得发虚。这里把对比度和字重一起抬到可读区间，
+ * 数字、表格正文和页脚都保持「次要」层级，但不再灰到看不清。 */
+
+.brand .version,
+.dateline,
+.tab-group-label,
+.stat-card .label,
+.stat-card .sub,
+.section-sub,
+.sub,
+.card-note,
+.mem-note,
+.hnote,
+.go-desc,
+.inline-note,
+.empty-step-label,
+.layer-from,
+.layer-detail,
+.rel-time,
+table.mini-table td,
+table.mini-table td > div {
+  color: var(--ink-secondary) !important;
+  font-weight: 700 !important;
+  letter-spacing: 0.01em !important;
+}
+
+.brand .version,
+.dateline {
+  font-size: 11.5px !important;
+}
+
+table.mini-table td {
+  font-size: 12.5px !important;
+}
+
+/* 会话列表里的摘要是 11px/500 且用了最暗的灰色，放大并提亮 */
+table.mini-table td > div {
+  font-size: 12px !important;
+  line-height: 1.5 !important;
+  white-space: normal !important;
+}
+
+.ws-status,
+.chip,
+.cb-indicator {
+  font-size: 12px !important;
+  font-weight: 700 !important;
+}
+
+/* 页脚原本 10px/400，深色下几乎糊成一片 */
+.viewer-footer,
+.viewer-footer span,
+.viewer-footer a,
+.footer-keys {
+  font-size: 11.5px !important;
+  font-weight: 600 !important;
+  color: var(--ink-secondary) !important;
+  letter-spacing: 0.01em !important;
+}
+
+/* 第十四轮：审计页仍有一批 11px/400 的元信息没被前面的规则覆盖，
+ * 在深色背景上明显发虚。日期筛选、时间、目标数量和「另有 N 条」统一
+ * 抬到 12px/700，并保持次要文字的中灰；kind-tag 徽章不动。 */
+
+.tb-label,
+.audit-when,
+.audit-targets,
+.audit-targets > span:not(.kind-tag) {
+  color: var(--ink-secondary) !important;
+  font-weight: 700 !important;
+  letter-spacing: 0.01em !important;
+}
+
+.tb-label,
+.audit-when,
+.audit-targets,
+.audit-targets > span:not(.kind-tag) {
+  font-size: 12px !important;
+}
+
+.audit-when .icon-btn {
+  color: var(--ink-secondary) !important;
+  font-size: 12px !important;
+  font-weight: 700 !important;
+}

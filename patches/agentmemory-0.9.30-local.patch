@@ -1,0 +1,764 @@
+--- dist/cli.mjs	1985-10-26 16:15:00.000000000 +0800
++++ /home/addspell/agentmemory-trial/node_modules/@agentmemory/agentmemory/dist/cli.mjs	2026-10-12 23:53:53.341748544 +0800
+@@ -2534,7 +2534,7 @@
+ 		}
+ 		if (flagsRes) {
+ 			const provider = flagsRes.provider === "llm" ? pc.green("✓ llm") : pc.yellow("✗ noop (no key)");
+-			const embed = flagsRes.embeddingProvider === "embeddings" ? pc.green("✓ embeddings") : pc.dim("bm25-only");
++			const embed = (flagsRes.embeddingProvider && flagsRes.embeddingProvider !== "none") ? pc.green("✓ embeddings") : pc.dim("bm25-only");
+ 			const flagRows = (flagsRes.flags || []).map((f) => `  ${f.enabled ? pc.green("✓") : pc.dim("✗")} ${pc.bold(f.key.padEnd(32))} ${f.label}`);
+ 			lines.push("");
+ 			lines.push(`Provider:     ${provider}`);
+@@ -2746,7 +2746,7 @@
+ 		apiFetch(base, "graph/stats", 3e3)
+ 	]);
+ 	const hasLlm = flags?.provider === "llm";
+-	const hasEmbed = flags?.embeddingProvider === "embeddings";
++	const hasEmbed = (flags?.embeddingProvider && flags.embeddingProvider !== "none");
+ 	const graphHas = Number(graph?.totalNodes ?? graph?.nodes ?? graph?.nodeCount ?? 0) > 0;
+ 	checks.push({
+ 		name: "Health status",
+--- dist/src-Jsq9LCeH.mjs	1985-10-26 16:15:00.000000000 +0800
++++ /home/addspell/agentmemory-trial/node_modules/@agentmemory/agentmemory/dist/src-Jsq9LCeH.mjs	2026-10-20 00:04:14.730336009 +0800
+@@ -4646,6 +4646,60 @@
+ 	});
+ }
+ function registerObserveFunction(sdk, kv, dedupMap, maxObservationsPerSession) {
++	const idleFinalizeTimers = /* @__PURE__ */ new Map();
++	const scheduleIdleFinalize = (sessionId, lockSessionId = sessionId, delayMs) => {
++		const configured = Number.parseInt(process.env["AGENTMEMORY_FINALIZE_IDLE_MS"] || "", 10);
++		const idleMs = Number.isFinite(configured) && configured >= 0 ? configured : 12e4;
++		const waitMs = typeof delayMs === "number" && delayMs >= 0 ? delayMs : idleMs;
++		const pending = idleFinalizeTimers.get(sessionId);
++		if (pending) clearTimeout(pending);
++		const timer = setTimeout(async () => {
++			idleFinalizeTimers.delete(sessionId);
++			let rescheduleIn = 0;
++			try {
++				const finalized = await withKeyedLock(`obs:${lockSessionId}`, async () => {
++					const session = await kv.get(KV.sessions, sessionId);
++					if (!session || session.id !== sessionId || session.status !== "active") return false;
++					const lastActivity = typeof session.updatedAt === "string" ? Date.parse(session.updatedAt) : Number.NaN;
++					if (Number.isFinite(lastActivity)) {
++						const remaining = idleMs - (Date.now() - lastActivity);
++						if (remaining > 0) {
++							rescheduleIn = remaining;
++							return false;
++						}
++					}
++					await kv.update(KV.sessions, sessionId, [{
++						type: "set",
++						path: "endedAt",
++						value: (/* @__PURE__ */ new Date()).toISOString()
++					}, {
++						type: "set",
++						path: "status",
++						value: "completed"
++					}]);
++					return true;
++				});
++				if (rescheduleIn > 0) {
++					scheduleIdleFinalize(sessionId, lockSessionId, rescheduleIn);
++					return;
++				}
++				if (!finalized) return;
++				logger.info("session idle finalized", { sessionId, baseSessionId: lockSessionId });
++				await sdk.trigger({
++					function_id: "event::session::stopped",
++					payload: { sessionId },
++					action: TriggerAction.Void()
++				});
++			} catch (err) {
++				logger.warn("idle finalize failed", {
++					sessionId,
++					error: err instanceof Error ? err.message : String(err)
++				});
++			}
++		}, waitMs);
++		if (typeof timer === "object" && timer && "unref" in timer) timer.unref();
++		idleFinalizeTimers.set(sessionId, timer);
++	};
+ 	sdk.registerFunction("mem::observe", async (payload) => {
+ 		if (!payload?.sessionId || typeof payload.sessionId !== "string" || !payload.hookType || typeof payload.hookType !== "string" || !payload.timestamp || typeof payload.timestamp !== "string") return {
+ 			success: false,
+@@ -4736,11 +4790,63 @@
+ 					sessionId: payload.sessionId
+ 				};
+ 			}
+-			if (maxObservationsPerSession && maxObservationsPerSession > 0) {
+-				if (existing.length >= maxObservationsPerSession) return {
+-					success: false,
+-					error: `Session observation limit reached (${maxObservationsPerSession})`
+-				};
++			if (maxObservationsPerSession && maxObservationsPerSession > 0 && existing.length >= maxObservationsPerSession) {
++				const baseSession = await kv.get(KV.sessions, payload.sessionId);
++				const sessionBeforeRollover = payload.sessionId;
++				let shardIndex = 2;
++				let shardId = `${sessionBeforeRollover}~${shardIndex}`;
++				let shardSession = await kv.get(KV.sessions, shardId);
++				let shardObs = shardSession ? await kv.list(KV.observations(shardId)) : [];
++				while (shardSession && shardIndex < 100) {
++					if (shardSession.status !== "completed" && shardObs.length < maxObservationsPerSession) break;
++					shardIndex++;
++					shardId = `${sessionBeforeRollover}~${shardIndex}`;
++					shardSession = await kv.get(KV.sessions, shardId);
++					shardObs = shardSession ? await kv.list(KV.observations(shardId)) : [];
++				}
++				if (shardSession) {
++					if (shardSession.status === "completed" || shardObs.length >= maxObservationsPerSession) return {
++						success: false,
++						retryable: true,
++						reason: "session-full",
++						error: `Session observation limit reached (${maxObservationsPerSession}); no shard slot available`
++					};
++				} else {
++					const nowIso = (/* @__PURE__ */ new Date()).toISOString();
++					shardSession = {
++						id: shardId,
++						project: baseSession?.project ?? payload.project,
++						cwd: baseSession?.cwd ?? payload.cwd,
++						startedAt: payload.timestamp ?? nowIso,
++						updatedAt: nowIso,
++						status: "active",
++						observationCount: 0,
++						parentSessionId: sessionBeforeRollover,
++						shardIndex,
++						...(baseSession?.agentId ? { agentId: baseSession.agentId } : {}),
++						...(baseSession?.firstPrompt ? { firstPrompt: baseSession.firstPrompt } : {})
++					};
++					await kv.set(KV.sessions, shardId, shardSession);
++					if (shardSession.project) await addSessionToProjectIndex(kv, shardSession.project, {
++						id: shardId,
++						startedAt: shardSession.startedAt,
++						...(shardSession.agentId ? { agentId: shardSession.agentId } : {})
++					}).catch((err) => {
++						logger.warn("shard session index update failed", {
++							sessionId: shardId,
++							error: err instanceof Error ? err.message : String(err)
++						});
++					});
++				}
++				logger.warn("session observation cap reached, rolled over to shard", {
++					baseSessionId: sessionBeforeRollover,
++					shardSessionId: shardId,
++					shardIndex,
++					maxObservationsPerSession
++				});
++				payload.sessionId = shardId;
++				raw.sessionId = shardId;
++				if (baseSession?.status === "completed") scheduleIdleFinalize(shardId, sessionBeforeRollover);
+ 			}
+ 			const existingSession = await kv.get(KV.sessions, payload.sessionId);
+ 			const inheritedAgentId = existingSession ? existingSession.agentId : getAgentId();
+@@ -4804,6 +4910,7 @@
+ 				action: TriggerAction.Void()
+ 			});
+ 			const session = existingSession;
++			const sessionWasCompleted = session?.status === "completed";
+ 			if (session) {
+ 				const updates = [{
+ 					type: "set",
+@@ -4814,7 +4921,7 @@
+ 					path: "observationCount",
+ 					value: (session.observationCount || 0) + 1
+ 				}];
+-				if (session.status === "abandoned") {
++				if (session.status === "abandoned" || session.status === "completed") {
+ 					updates.push({
+ 						type: "set",
+ 						path: "status",
+@@ -4834,6 +4941,7 @@
+ 					});
+ 				}
+ 				await kv.update(KV.sessions, payload.sessionId, updates);
++				if (sessionWasCompleted) scheduleIdleFinalize(payload.sessionId, payload.sessionId);
+ 			} else if (typeof payload.project === "string" && payload.project.trim().length > 0 && typeof payload.cwd === "string" && payload.cwd.trim().length > 0) {
+ 				const trimmedPrompt = typeof raw.userPrompt === "string" ? raw.userPrompt.replace(/\s+/g, " ").trim().slice(0, 200) : void 0;
+ 				const ts = (/* @__PURE__ */ new Date()).toISOString();
+@@ -4900,7 +5008,10 @@
+ 				hook: payload.hookType,
+ 				compress: isAutoCompressEnabled() ? "llm" : "synthetic"
+ 			});
+-			return { observationId: obsId };
++			return {
++				observationId: obsId,
++				sessionId: payload.sessionId
++			};
+ 		});
+ 	});
+ }
+@@ -5004,11 +5115,11 @@
+ 		if (inboxSize === null) inboxSize = (await kv.list(KV.captureInbox)).length;
+ 		return inboxSize;
+ 	}
+-	async function complete(rec, observationId) {
++	async function complete(rec, observationId, sessionId) {
+ 		const done = {
+ 			key: rec.key,
+ 			eventId: rec.eventId,
+-			sessionId: rec.sessionId,
++			sessionId: sessionId || rec.sessionId,
+ 			project: rec.project,
+ 			observationId,
+ 			acceptedAt: rec.acceptedAt,
+@@ -5050,7 +5161,7 @@
+ 		const now = /* @__PURE__ */ new Date();
+ 		if (!failure && result && typeof result.observationId === "string") {
+ 			if (rec.attempts > 1) counters.recovered++;
+-			await complete(rec, result.observationId);
++			await complete(rec, result.observationId, typeof result.sessionId === "string" ? result.sessionId : void 0);
+ 			return {
+ 				status: "accepted",
+ 				state: "completed",
+@@ -5069,9 +5180,12 @@
+ 				deduplicated: true
+ 			};
+ 		}
+-		const permanent = !failure;
++		const retryable = !failure && result && result.retryable === true;
++		const permanent = !failure && !retryable;
+ 		const message = failure ?? (result && typeof result.error === "string" ? result.error : "mem::observe returned no observation");
+-		if (permanent || rec.attempts >= policy.maxAttempts) {
++		const overflowSince = retryable && typeof rec.overflowFirstAt === "string" ? Date.parse(rec.overflowFirstAt) : NaN;
++		const overflowExpired = retryable && Number.isFinite(overflowSince) && now.getTime() - overflowSince > 24 * 60 * 60 * 1e3;
++		if (permanent || overflowExpired || !retryable && rec.attempts >= policy.maxAttempts) {
+ 			const dead = {
+ 				...rec,
+ 				status: "dead",
+@@ -5095,13 +5209,18 @@
+ 				observationId: rec.observationId
+ 			};
+ 		}
+-		const nextAttemptAt = new Date(now.getTime() + backoffMs(rec.attempts, policy)).toISOString();
++		const retryDelayMs = retryable ? Math.min(6e4 * 2 ** Math.max(0, (rec.overflowAttempts || 1) - 1), 18e5) : backoffMs(rec.attempts, policy);
++		const nextAttemptAt = new Date(now.getTime() + retryDelayMs).toISOString();
+ 		const retrying = {
+ 			...rec,
+ 			status: "retrying",
+ 			updatedAt: now.toISOString(),
+ 			nextAttemptAt,
+-			lastError: message
++			lastError: message,
++			...(retryable ? {
++				overflowAttempts: (rec.overflowAttempts || 1) + 1,
++				overflowFirstAt: rec.overflowFirstAt || now.toISOString()
++			} : {})
+ 		};
+ 		await kv.set(KV.captureInbox, rec.key, retrying);
+ 		counters.retried++;
+@@ -5217,7 +5336,11 @@
+ 				counters.duplicates++;
+ 				return "gone";
+ 			}
+-			if (force) rec.attempts = 0;
++			if (force) {
++				rec.attempts = 0;
++				delete rec.overflowAttempts;
++				delete rec.overflowFirstAt;
++			}
+ 			const outcome = await attempt({ ...rec });
+ 			if (outcome.status === "accepted" && outcome.state === "completed") return "recovered";
+ 			if (outcome.status === "rejected") return "dead";
+@@ -5704,6 +5827,31 @@
+ 	while ((m = re.exec(parentMatch[1])) !== null) items.push(m[1].trim());
+ 	return items;
+ }
++function getXmlChildrenLoose(xml, parentTag, childTag) {
++	const strict = getXmlChildren(xml, parentTag, childTag);
++	if (strict.length > 0) return strict;
++	if (!VALID_TAG.test(parentTag)) return [];
++	const parentMatch = xml.match(new RegExp(`<${parentTag}>([\\s\\S]*?)<\/${parentTag}>`));
++	if (!parentMatch) return [];
++	const tagOnly = /^<\/?[a-zA-Z_][a-zA-Z0-9_-]*>$/;
++	const items = [];
++	let current = null;
++	for (const rawLine of parentMatch[1].split(/\r?\n/)) {
++		const trimmed = rawLine.trim();
++		if (!trimmed || tagOnly.test(trimmed)) continue;
++		const bullet = trimmed.match(/^(?:[-*•]|\d+[.)])\s+(.*)$/);
++		if (bullet) {
++			if (current) items.push(current);
++			current = bullet[1].trim();
++		} else if (current) {
++			current = `${current} ${trimmed}`;
++		} else {
++			items.push(trimmed);
++		}
++	}
++	if (current) items.push(current);
++	return items.filter((item) => item.length > 0);
++}
+ //#endregion
+ //#region src/functions/slots.ts
+ const DEFAULT_SIZE_LIMIT = 2e3;
+@@ -6459,6 +6607,62 @@
+ 	};
+ }
+ function registerCompressFunction(sdk, kv, provider, metricsStore) {
++	const summaryRefreshTimers = /* @__PURE__ */ new Map();
++	const summaryInFlight = () => globalThis.__agentmemorySummaryInFlight || (globalThis.__agentmemorySummaryInFlight = /* @__PURE__ */ new Map());
++	const beginSummary = (sessionId) => {
++		const inFlight = summaryInFlight();
++		inFlight.set(sessionId, (inFlight.get(sessionId) || 0) + 1);
++		return () => {
++			const remaining = (inFlight.get(sessionId) || 1) - 1;
++			if (remaining <= 0) inFlight.delete(sessionId);
++			else inFlight.set(sessionId, remaining);
++		};
++	};
++	const isSummaryInFlight = (sessionId) => (summaryInFlight().get(sessionId) || 0) > 0;
++	const scheduleSummaryRefresh = (sessionId) => {
++		if (typeof sessionId !== "string" || sessionId.length === 0) return;
++		const configured = Number.parseInt(process.env["AGENTMEMORY_SUMMARY_REFRESH_MS"] || "", 10);
++		const delayMs = Number.isFinite(configured) && configured >= 0 ? configured : 3e3;
++		const pending = summaryRefreshTimers.get(sessionId);
++		if (pending) clearTimeout(pending);
++		const timer = setTimeout(async () => {
++			summaryRefreshTimers.delete(sessionId);
++			try {
++				const session = await kv.get(KV.sessions, sessionId);
++				if (!session || session.id !== sessionId || session.status !== "completed") return;
++				const compressed = (await kv.list(KV.observations(sessionId))).filter((o) => o.title);
++				if (compressed.length === 0) return;
++				const summary = await kv.get(KV.summaries, sessionId);
++				if (summary && (summary.observationCount || 0) >= compressed.length) return;
++				if (isSummaryInFlight(sessionId)) {
++					logger.info("summary refresh deferred while summarize in flight", { sessionId });
++					scheduleSummaryRefresh(sessionId);
++					return;
++				}
++				logger.info("refreshing summary after late compression", {
++					sessionId,
++					compressed: compressed.length,
++					summaryObservationCount: summary?.observationCount ?? null
++				});
++				const endSummary = beginSummary(sessionId);
++				try {
++					await sdk.trigger({
++						function_id: "mem::summarize",
++						payload: { sessionId }
++					});
++				} finally {
++					endSummary();
++				}
++			} catch (err) {
++				logger.warn("summary refresh after late compression failed", {
++					sessionId,
++					error: err instanceof Error ? err.message : String(err)
++				});
++			}
++		}, delayMs);
++		if (typeof timer === "object" && timer && "unref" in timer) timer.unref();
++		summaryRefreshTimers.set(sessionId, timer);
++	};
+ 	sdk.registerFunction("mem::compress", async (data) => {
+ 		const startMs = Date.now();
+ 		if (!data?.raw || typeof data.raw.hookType !== "string" || !data.raw.hookType) return {
+@@ -6576,6 +6780,7 @@
+ 				observationId: data.observationId,
+ 				error: result.reason instanceof Error ? result.reason.message : String(result.reason)
+ 			});
++			scheduleSummaryRefresh(data.sessionId);
+ 			const latencyMs = Date.now() - startMs;
+ 			if (metricsStore) await metricsStore.record("mem::compress", latencyMs, true, qualityScore);
+ 			logger.info("Observation compressed", {
+@@ -6780,7 +6985,19 @@
+ - Focus on outcomes, not individual tool calls
+ - Highlight decisions and their rationale
+ - List all files that were created or modified
+-- Concepts should be searchable terms for future context retrieval`;
++- Concepts should be searchable terms for future context retrieval
++- Every decision must be wrapped in its own <decision>...</decision> tag
++- Every file must be wrapped in its own <file>...</file> tag
++- Every concept must be wrapped in its own <concept>...</concept> tag
++- Never use Markdown bullets, numbered lists, or plain lines inside <decisions>, <files>, or <concepts>
++- Every decision must be wrapped in its own <decision>...</decision> tag
++- Every file must be wrapped in its own <file>...</file> tag
++- Every concept must be wrapped in its own <concept>...</concept> tag
++- Never use Markdown bullets, numbered lists, or plain lines inside <decisions>, <files>, or <concepts>
++- Every decision must be wrapped in its own <decision>...</decision> tag
++- Every file must be wrapped in its own <file>...</file> tag
++- Every concept must be wrapped in its own <concept>...</concept> tag
++- Never use Markdown bullets, numbered lists, or plain lines inside <decisions>, <files>, or <concepts>`;
+ function buildSummaryPrompt(observations) {
+ 	const lines = observations.map((obs, i) => {
+ 		const facts = obs.facts.map((f) => `  - ${f}`).join("\n");
+@@ -6810,7 +7027,19 @@
+ - Synthesize a single narrative that reflects the whole arc, not a chunk-by-chunk recap
+ - Preserve every distinct decision across chunks
+ - Union (deduplicate) all files and concepts
+-- Title should capture the session's overall outcome`;
++- Title should capture the session's overall outcome
++- Every decision must be wrapped in its own <decision>...</decision> tag
++- Every file must be wrapped in its own <file>...</file> tag
++- Every concept must be wrapped in its own <concept>...</concept> tag
++- Never use Markdown bullets, numbered lists, or plain lines inside <decisions>, <files>, or <concepts>
++- Every decision must be wrapped in its own <decision>...</decision> tag
++- Every file must be wrapped in its own <file>...</file> tag
++- Every concept must be wrapped in its own <concept>...</concept> tag
++- Never use Markdown bullets, numbered lists, or plain lines inside <decisions>, <files>, or <concepts>
++- Every decision must be wrapped in its own <decision>...</decision> tag
++- Every file must be wrapped in its own <file>...</file> tag
++- Every concept must be wrapped in its own <concept>...</concept> tag
++- Never use Markdown bullets, numbered lists, or plain lines inside <decisions>, <files>, or <concepts>`;
+ function buildReducePrompt(partials) {
+ 	const sections = partials.map((p, i) => {
+ 		const decisions = p.keyDecisions.map((d) => `  - ${d}`).join("\n");
+@@ -6935,9 +7164,9 @@
+ 		createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+ 		title,
+ 		narrative: getXmlTag(cleaned, "narrative"),
+-		keyDecisions: getXmlChildren(cleaned, "decisions", "decision"),
+-		filesModified: getXmlChildren(cleaned, "files", "file"),
+-		concepts: getXmlChildren(cleaned, "concepts", "concept"),
++		keyDecisions: getXmlChildrenLoose(cleaned, "decisions", "decision"),
++		filesModified: getXmlChildrenLoose(cleaned, "files", "file"),
++		concepts: getXmlChildrenLoose(cleaned, "concepts", "concept"),
+ 		observationCount: obsCount
+ 	};
+ }
+@@ -10567,6 +10796,82 @@
+ 		written: dirty.length
+ 	};
+ }
++// 自动 consolidation 产出的 semantic facts 同时沉淀为 Memories，否则 Memories 页永远是空的。
++const CONSOLIDATED_SEMANTIC_MIN_CONFIDENCE = 0.7;
++async function consolidateSemanticFactsToMemories(kv, sem) {
++	const existingMemories = await kv.list(KV.memories);
++	const targetIds = sem.sourceMemoryIds ?? [];
++	const isKnown = (m) =>
++		(Boolean(m.semanticFactId) && (m.semanticFactId === sem.id || targetIds.includes(m.semanticFactId)))
++		|| m.type === "pattern" && m.content === sem.fact;
++	if (existingMemories.some((m) => m.isLatest !== false && isKnown(m))) return null;
++	const now = (/* @__PURE__ */ new Date()).toISOString();
++	const memory = {
++		id: generateId("mem"),
++		createdAt: now,
++		updatedAt: now,
++		type: "fact",
++		title: safeSlice(sem.fact, 80),
++		content: sem.fact,
++		concepts: [],
++		files: [],
++		sessionIds: sem.sourceSessionIds ?? [],
++		strength: Math.max(1, Math.min(10, Math.round(sem.strength ?? sem.confidence * 10))),
++		version: 1,
++		isLatest: true,
++		sourceObservationIds: [],
++		semanticFactId: sem.id,
++		origin: {
++			channel: "consolidation",
++			capturedAt: now
++		}
++	};
++	await kv.set(KV.memories, memory.id, memory);
++	await recordAudit(kv, "remember", "mem::consolidate-pipeline", [memory.id], {
++		action: "semantic_to_memory",
++		semanticFactId: sem.id,
++		confidence: sem.confidence
++	});
++	return memory.id;
++}
++// 回溯：把历史 semantic facts 批量补成 Memories（days=0 表示不限时间，max 为单次上限）
++async function backfillSemanticFactsToMemories(kv, data) {
++	const minConf = Number(data?.minConfidence ?? CONSOLIDATED_SEMANTIC_MIN_CONFIDENCE);
++	const days = Number(data?.days ?? 7);
++	const max = Number(data?.max ?? 50);
++	const cutoff = days > 0 ? Date.now() - days * 24 * 60 * 60 * 1e3 : 0;
++	const before = (await kv.list(KV.memories)).length;
++	const facts = (await kv.list(KV.semantic))
++		.filter((s) => Number(s.confidence) >= minConf && new Date(s.createdAt).getTime() >= cutoff)
++		.sort((a, b) => b.confidence - a.confidence);
++	const scanned = facts.length;
++	const created = [];
++	for (const sem of facts) {
++		if (created.length >= max) break;
++		try {
++			const id = await consolidateSemanticFactsToMemories(kv, sem);
++			if (id) created.push({ id, semanticFactId: sem.id });
++		} catch (err) {
++			logger.warn("Semantic to memory conversion failed", {
++				semanticFactId: sem.id,
++				error: err instanceof Error ? err.message : String(err)
++			});
++		}
++	}
++	const after = (await kv.list(KV.memories)).length;
++	const removedStale = Math.max(0, before + created.length - after);
++	await recordAudit(kv, "remember", "mem::consolidate-pipeline", created.map((c) => c.id), {
++		action: "semantic_backfill",
++		scanned,
++		created: created.length,
++		removedStale,
++		minConfidence: minConf,
++		days
++	});
++	logger.info("Semantic facts backfilled to memories", { scanned, created: created.length, removedStale, minConfidence: minConf, days });
++	return { scanned, created: created.length, removedStale, ids: created.map((c) => c.id) };
++}
++
+ function registerConsolidationPipelineFunction(sdk, kv, provider) {
+ 	sdk.registerFunction("mem::consolidate-pipeline", async (data) => {
+ 		if (!data?.force && !isConsolidationEnabled()) return {
+@@ -10575,11 +10880,22 @@
+ 			reason: "Consolidation disabled: set CONSOLIDATION_ENABLED=true or configure an LLM provider (ANTHROPIC_API_KEY / OPENAI_API_KEY / OPENROUTER_API_KEY / GEMINI_API_KEY / GOOGLE_API_KEY / MINIMAX_API_KEY, or AGENTMEMORY_ALLOW_AGENT_SDK=true). OPENAI_BASE_URL alone only points an OpenAI key at another server; it is not a provider."
+ 		};
+ 		const tier = data?.tier || "all";
++			if (tier === "backfill") {
++				data = { ...data, max: Math.min(1000, (await kv.list(KV.semantic)).length) };
++				const backfill = await backfillSemanticFactsToMemories(kv, data);
++				await recordAudit(kv, "consolidate", "mem::consolidate-pipeline", [], {
++					tier,
++					results: { backfill }
++				});
++				await kv.set(KV.config, CONSOLIDATION_LAST_RUN_KEY, { at: new Date().toISOString(), tier, results: { backfill } }).catch(() => {});
++				return { success: true, results: { backfill } };
++			}
+ 		const decayDays = getConsolidationDecayDays();
+ 		const results = {};
+ 		if (tier === "all" || tier === "semantic") {
+ 			const summaries = await kv.list(KV.summaries);
+ 			const existingSemantic = await kv.list(KV.semantic);
++			const newFactsForMemories = [];
+ 			if (summaries.length >= 5) {
+ 				const recentSummaries = summaries.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()).slice(0, 20);
+ 				const prompt = buildSemanticMergePrompt(recentSummaries.map((s) => ({
+@@ -10619,10 +10935,24 @@
+ 							};
+ 							await kv.set(KV.semantic, sem.id, sem);
+ 							newFacts++;
++							if (sem.confidence >= CONSOLIDATED_SEMANTIC_MIN_CONFIDENCE) newFactsForMemories.push(sem);
++						}
++					}
++					const convertedMemoryIds = [];
++					for (const sem of newFactsForMemories) {
++						try {
++							const memoryId = await consolidateSemanticFactsToMemories(kv, sem);
++							if (memoryId) convertedMemoryIds.push(memoryId);
++						} catch (err) {
++							logger.warn("Semantic to memory conversion failed", {
++								semanticFactId: sem.id,
++								error: err instanceof Error ? err.message : String(err)
++							});
+ 						}
+ 					}
+ 					results.semantic = {
+ 						newFacts,
++						newMemories: convertedMemoryIds.length,
+ 						totalSummaries: summaries.length
+ 					};
+ 				} catch (err) {
+@@ -13386,10 +13716,10 @@
+ }
+ //#endregion
+ //#region src/functions/crystallize.ts
+-const CRYSTALLIZE_SYSTEM = `You are summarizing a completed chain of agent actions into a compact digest.
+-Extract: (1) what was accomplished in 1-2 sentences, (2) key decisions as bullet points,
+-(3) files affected, (4) any lessons or patterns worth remembering.
+-Return as JSON: { "narrative": "...", "keyOutcomes": ["..."], "filesAffected": ["..."], "lessons": ["..."] }`;
++const CRYSTALLIZE_SYSTEM = `你在把一串已完成的 agent action 总结成一份紧凑的结晶（digest）。
++请始终使用简体中文输出所有自然语言内容；专有名词、代码路径、API 名称和命令保持原文。
++提取：(1) 用 1-2 句话说明完成了什么，(2) 关键决策（要点形式），(3) 涉及的文件，(4) 值得记住的经验或模式。
++只返回 JSON：{ "narrative": "...", "keyOutcomes": ["..."], "filesAffected": ["..."], "lessons": ["..."] }`;
+ function registerCrystallizeFunction(sdk, kv, provider) {
+ 	sdk.registerFunction("mem::crystallize", async (data) => {
+ 		if (!data.actionIds || data.actionIds.length === 0) return {
+@@ -18795,19 +19125,43 @@
+ 		const endResult = await withKeyedLock(`obs:${sessionId}`, async () => {
+ 			const session = await kv.get(KV.sessions, sessionId);
+ 			if (!session || session.id !== sessionId) return "not_found";
+-			if (session.status === "completed") return "already_completed";
+-			await kv.update(KV.sessions, sessionId, [{
+-				type: "set",
+-				path: "endedAt",
+-				value: (/* @__PURE__ */ new Date()).toISOString()
+-			}, {
+-				type: "set",
+-				path: "status",
+-				value: "completed"
+-			}]);
+-			return "ended";
++			const endedAt = (/* @__PURE__ */ new Date()).toISOString();
++			let baseEnded = false;
++			let shardsEnded = 0;
++			if (session.status !== "completed") {
++				await kv.update(KV.sessions, sessionId, [{
++					type: "set",
++					path: "endedAt",
++					value: endedAt
++				}, {
++					type: "set",
++					path: "status",
++					value: "completed"
++				}]);
++				baseEnded = true;
++			}
++			for (let shardIndex = 2; shardIndex < 100; shardIndex++) {
++				const shardId = `${sessionId}~${shardIndex}`;
++				const shardSession = await kv.get(KV.sessions, shardId);
++				if (!shardSession || shardSession.parentSessionId !== sessionId) break;
++				if (shardSession.status === "completed") continue;
++				await kv.update(KV.sessions, shardId, [{
++					type: "set",
++					path: "endedAt",
++					value: endedAt
++				}, {
++					type: "set",
++					path: "status",
++					value: "completed"
++				}]);
++				shardsEnded++;
++				logger.info(baseEnded ? "shard ended with base session" : "shard ended with completed base session", { sessionId: shardId, baseSessionId: sessionId });
++			}
++			if (baseEnded) return "ended";
++			if (shardsEnded > 0) return "shards_ended";
++			return "already_completed";
+ 		});
+-		if (endResult !== "ended") return {
++		if (endResult !== "ended" && endResult !== "shards_ended") return {
+ 			status_code: 200,
+ 			body: {
+ 				success: true,
+@@ -18818,7 +19172,7 @@
+ 		try {
+ 			sdk.trigger({
+ 				function_id: "event::session::stopped",
+-				payload: { sessionId },
++				payload: endResult === "shards_ended" ? { sessionId, shardsOnly: true } : { sessionId },
+ 				action: TriggerAction.Void()
+ 			});
+ 		} catch (err) {
+@@ -18831,7 +19185,8 @@
+ 			status_code: 200,
+ 			body: {
+ 				success: true,
+-				ended: true
++				ended: true,
++				...(endResult === "shards_ended" ? { reason: "shards_ended" } : {})
+ 			}
+ 		};
+ 	});
+@@ -22403,10 +22758,47 @@
+ 		config: { topic: "agentmemory.observation" }
+ 	});
+ 	sdk.registerFunction("event::session::stopped", async (data) => {
+-		const summary = await sdk.trigger({
+-			function_id: "mem::summarize",
+-			payload: data
+-		});
++		const summaryInFlight = globalThis.__agentmemorySummaryInFlight || (globalThis.__agentmemorySummaryInFlight = /* @__PURE__ */ new Map());
++		const beginSummary = (sessionId) => {
++			summaryInFlight.set(sessionId, (summaryInFlight.get(sessionId) || 0) + 1);
++			return () => {
++				const remaining = (summaryInFlight.get(sessionId) || 1) - 1;
++				if (remaining <= 0) summaryInFlight.delete(sessionId);
++				else summaryInFlight.set(sessionId, remaining);
++			};
++		};
++		const summarizeSession = async (sessionId) => {
++			const endSummary = beginSummary(sessionId);
++			try {
++				return await sdk.trigger({
++					function_id: "mem::summarize",
++					payload: { ...data, sessionId }
++				});
++			} finally {
++				endSummary();
++			}
++		};
++		const summarizeShards = async () => {
++			if (typeof data.sessionId !== "string" || data.sessionId.length === 0) return;
++			for (let shardIndex = 2; shardIndex < 100; shardIndex++) {
++				const shardId = `${data.sessionId}~${shardIndex}`;
++				const shardSession = await kv.get(KV.sessions, shardId);
++				if (!shardSession || shardSession.parentSessionId !== data.sessionId) break;
++				await summarizeSession(shardId).catch((err) => logger.warn("shard summarize failed", {
++					sessionId: shardId,
++					error: err instanceof Error ? err.message : String(err)
++				}));
++			}
++		};
++		if (data?.shardsOnly) {
++			await summarizeShards();
++			return {
++				success: true,
++				shardsOnly: true
++			};
++		}
++		const summary = await summarizeSession(data.sessionId);
++		await summarizeShards();
+ 		const fireVoid = (function_id, payload) => sdk.trigger({
+ 			function_id,
+ 			payload,
+@@ -22452,26 +22844,51 @@
+ 		const endResult = await withKeyedLock(`obs:${sessionId}`, async () => {
+ 			const session = await kv.get(KV.sessions, sessionId);
+ 			if (!session || session.id !== sessionId) return "not_found";
+-			if (session.status === "completed") return "already_completed";
+-			await kv.update(KV.sessions, sessionId, [{
+-				type: "set",
+-				path: "endedAt",
+-				value: (/* @__PURE__ */ new Date()).toISOString()
+-			}, {
+-				type: "set",
+-				path: "status",
+-				value: "completed"
+-			}]);
+-			return "ended";
++			const endedAt = (/* @__PURE__ */ new Date()).toISOString();
++			let baseEnded = false;
++			let shardsEnded = 0;
++			if (session.status !== "completed") {
++				await kv.update(KV.sessions, sessionId, [{
++					type: "set",
++					path: "endedAt",
++					value: endedAt
++				}, {
++					type: "set",
++					path: "status",
++					value: "completed"
++				}]);
++				baseEnded = true;
++			}
++			for (let shardIndex = 2; shardIndex < 100; shardIndex++) {
++				const shardId = `${sessionId}~${shardIndex}`;
++				const shardSession = await kv.get(KV.sessions, shardId);
++				if (!shardSession || shardSession.parentSessionId !== sessionId) break;
++				if (shardSession.status === "completed") continue;
++				await kv.update(KV.sessions, shardId, [{
++					type: "set",
++					path: "endedAt",
++					value: endedAt
++				}, {
++					type: "set",
++					path: "status",
++					value: "completed"
++				}]);
++				shardsEnded++;
++				logger.info("shard ended via session ended event", { sessionId: shardId, baseSessionId: sessionId });
++			}
++			if (baseEnded) return "ended";
++			if (shardsEnded > 0) return "shards_ended";
++			return "already_completed";
+ 		});
+-		if (endResult !== "ended") return {
++		if (endResult !== "ended" && endResult !== "shards_ended") return {
+ 			success: true,
+ 			ended: false,
+ 			reason: endResult
+ 		};
+ 		return {
+ 			success: true,
+-			ended: true
++			ended: true,
++			...(endResult === "shards_ended" ? { reason: "shards_ended" } : {})
+ 		};
+ 	});
+ 	sdk.registerTrigger({
+@@ -25041,4 +25458,4 @@
+ //#endregion
+ export {};
+ 
+-//# sourceMappingURL=src-Jsq9LCeH.mjs.map
+\ No newline at end of file
++//# sourceMappingURL=src-Jsq9LCeH.mjs.map
