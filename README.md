@@ -1,5 +1,11 @@
 # agentmemory-zh
 
+> **个人自用版（非官方）**
+>
+> 这是我自己日常使用 agentmemory 时顺手做的汉化层，不是 agentmemory 官方项目，也不代表上游立场。
+> 词典、字体样式和本地补丁都按我的使用习惯调整，不保证适配其他版本，也不承诺长期维护。
+> 欢迎参考或自行 fork，但请以自用为前提，不要当作官方中文版分发。
+
 agentmemory viewer 的简体中文汉化层：一个本地反向代理，在页面返回浏览器前注入中文词典和字体覆盖样式，不修改上游 `@agentmemory/agentmemory` 的安装文件。
 
 ## 组成
@@ -85,6 +91,7 @@ patch -p0 < /path/to/patches/agentmemory-0.9.30-local.patch
 
 ## 说明
 
+- 本项目是个人自用版，不是 agentmemory 官方仓库，也未获得官方背书。
 - 产品名、命令、路径、函数 ID、模型名和用户数据保持英文，不做翻译。
 - 页面注入后会禁用 HTML 缓存，避免浏览器继续显示旧译文。
 - 上游项目：<https://github.com/rohitg00/agentmemory>（Apache-2.0）。
